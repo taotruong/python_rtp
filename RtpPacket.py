@@ -78,3 +78,8 @@ class RtpPacket:
 	def getPacket(self):
 		"""Return RTP packet."""
 		return self.header + self.payload
+	def getMarker(self):
+		"""Return marker (M) bit."""
+		# Bit Marker nằm ở bit thứ 7 của byte thứ 2 (index 1)
+		marker = (self.header[1] >> 7) & 1
+		return int(marker)

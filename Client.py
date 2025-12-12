@@ -35,6 +35,7 @@ class Client:
 		self.teardownAcked = 0
 		self.connectToServer()
 		self.frameNbr = 0
+		self.frameBuffer = b"" # Thêm dòng này để chứa dữ liệu phân mảnh
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -75,7 +76,12 @@ class Client:
 		"""Teardown button handler."""
 		self.sendRtspRequest(self.TEARDOWN)		
 		self.master.destroy() # Close the gui window
-		os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
+		# os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) # Delete the cache image from video
+		try:
+			os.remove(CACHE_FILE_NAME + str(self.sessionId) + CACHE_FILE_EXT) 
+		except OSError:
+			# Nếu file không tồn tại (do chưa play được frame nào), bỏ qua lỗi
+			pass
 
 	def pauseMovie(self):
 		"""Pause button handler."""
@@ -100,12 +106,22 @@ class Client:
 					rtpPacket = RtpPacket()
 					rtpPacket.decode(data)
 					
+					# Lấy dữ liệu payload và thêm vào buffer hiện tại
+				self.frameBuffer += rtpPacket.getPayload()
+
+				# Kiểm tra xem đây có phải gói cuối cùng của khung hình không (Marker = 1)
+				if rtpPacket.getMarker() == 1:
 					currFrameNbr = rtpPacket.seqNum()
-					print("Current Seq Num: " + str(currFrameNbr))
-										
-					if currFrameNbr > self.frameNbr: # Discard the late packet
+					# print("Current Seq Num: " + str(currFrameNbr))
+
+					# Chỉ hiển thị nếu đây là frame mới (bỏ logic check > frameNbr nếu muốn đơn giản, 
+                    # nhưng tốt nhất giữ lại để tránh hiển thị frame cũ đến muộn)
+					if currFrameNbr > self.frameNbr: 
 						self.frameNbr = currFrameNbr
-						self.updateMovie(self.writeFrame(rtpPacket.getPayload()))
+						self.updateMovie(self.writeFrame(self.frameBuffer))
+
+					# Xóa buffer sau khi đã xử lý xong khung hình (dù có hiển thị hay không)
+					self.frameBuffer = b""
 			except:
 				# Stop listening upon requesting PAUSE or TEARDOWN
 				if self.playEvent.isSet(): 
