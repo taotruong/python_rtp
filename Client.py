@@ -36,6 +36,12 @@ class Client:
 		self.connectToServer()
 		self.frameNbr = 0
 		self.frameBuffer = b"" # Thêm dòng này để chứa dữ liệu phân mảnh
+		# --- SỬA ĐỔI ---
+		self.cacheBuffer = []        # Dùng List để làm bộ đệm
+		self.BUFFER_THRESHOLD = 60   # Ngưỡng đệm (60 frame)
+		self.isBufferPlaying = False # Cờ trạng thái phát
+		# ---------------
+		self.updateGUI()
 		
 	def createWidgets(self):
 		"""Build GUI."""
@@ -66,6 +72,25 @@ class Client:
 		# Create a label to display the movie
 		self.label = Label(self.master, height=19)
 		self.label.grid(row=0, column=0, columnspan=4, sticky=W+E+N+S, padx=5, pady=5) 
+
+		# 1. Thanh tiến trình Video (Progress Bar)
+		# Giả sử video dài khoảng 500 frame (hoặc bạn có thể tăng lên nếu video dài hơn)
+		self.progressLabel = Label(self.master, text="Video Progress")
+		self.progressLabel.grid(row=2, column=0, padx=2, pady=2)
+		
+		self.progressScale = Scale(self.master, from_=0, to=4832, orient=HORIZONTAL, length=300)
+		self.progressScale.grid(row=3, column=0, columnspan=4, padx=2, pady=2)
+
+		# 2. Thanh hiển thị bộ đệm (Cache Bar)
+		self.cacheLabel = Label(self.master, text="Buffer Level (Cache)")
+		self.cacheLabel.grid(row=4, column=0, padx=2, pady=2)
+		
+		# Tạo Canvas để vẽ thanh Cache
+		self.cacheCanvas = Canvas(self.master, width=300, height=20, bg='white', relief=SUNKEN, borderwidth=1)
+		self.cacheCanvas.grid(row=5, column=0, columnspan=4, padx=2, pady=2)
+		
+		# Vẽ hình chữ nhật đại diện cho lượng data (ban đầu là 0)
+		self.cacheBar = self.cacheCanvas.create_rectangle(0, 0, 0, 20, fill='blue')
 	
 	def setupMovie(self):
 		"""Setup button handler."""
@@ -118,7 +143,17 @@ class Client:
                     # nhưng tốt nhất giữ lại để tránh hiển thị frame cũ đến muộn)
 					if currFrameNbr > self.frameNbr: 
 						self.frameNbr = currFrameNbr
-						self.updateMovie(self.writeFrame(self.frameBuffer))
+                        
+                        # --- SỬA ĐỔI Ở ĐÂY ---
+                        # Thay vì gọi self.updateMovie() ngay, ta thêm vào cuối danh sách
+						self.cacheBuffer.append(self.frameBuffer)
+                        
+                        # Kiểm tra xem kho đã đủ hàng chưa (đủ 20 frame) và đã bắt đầu phát chưa
+						if not self.isBufferPlaying and len(self.cacheBuffer) >= self.BUFFER_THRESHOLD:
+                            # Nếu đủ rồi thì bật cờ và kích hoạt hàm phát (Consumer)
+							self.isBufferPlaying = True
+							self.playMovieFromBuffer()
+                        # ---------------------
 
 					# Xóa buffer sau khi đã xử lý xong khung hình (dù có hiển thị hay không)
 					self.frameBuffer = b""
@@ -168,6 +203,16 @@ class Client:
 			threading.Thread(target=self.recvRtspReply).start()
 			# Update RTSP sequence number.
 			# ...
+			# --- CẬP NHẬT: RESET SẠCH SẼ BIẾN CŨ TẠI ĐÂY ---
+			self.rtspSeq = 0
+			self.sessionId = 0          # Reset Session ID cũ
+			self.requestSent = -1
+			self.teardownAcked = 0      # <--- QUAN TRỌNG NHẤT: Đặt lại cờ này về 0
+			self.frameNbr = 0
+			self.buffer = []            # Xóa buffer cũ
+			self.packetLossCount = 0
+			self.totalBytes = 0
+            # -----------------------------------------------
 			self.rtspSeq += 1 
 
 			# Write the RTSP request to be sent.
@@ -264,6 +309,7 @@ class Client:
 						#-------------
 						# Update RTSP state.
 						# self.state = ...
+						self.cacheBuffer = []
 						self.state = self.READY
 						
 						# Open RTP port.
@@ -308,6 +354,58 @@ class Client:
 		"""Handler on explicitly closing the GUI window."""
 		self.pauseMovie()
 		if tkMessageBox.askokcancel("Quit?", "Are you sure you want to quit?"):
-			self.exitClient()
+            # --- THÊM DÒNG NÀY ---
+			self.cacheBuffer = [] # Xóa sạch bộ đệm
+			self.isBufferPlaying = False
+            # ---------------------
+			self.sendRtspRequest(self.TEARDOWN)
+			self.master.destroy() # Close the gui window
 		else: # When the user presses cancel, resume playing.
 			self.playMovie()
+	
+	def playMovieFromBuffer(self):
+		"""Lấy frame từ bộ đệm List và hiển thị."""
+        # Chỉ chạy khi trạng thái là PLAYING
+		if self.state == self.PLAYING:
+            
+            # Kiểm tra xem trong kho còn hàng không
+				if len(self.cacheBuffer) > 0:
+                	# Lấy phần tử đầu tiên ra khỏi danh sách (FIFO) và xóa nó khỏi kho
+					data = self.cacheBuffer.pop(0)
+                
+                	# Ghi dữ liệu ra file ảnh và hiển thị lên giao diện
+					self.updateMovie(self.writeFrame(data))
+            
+            	# Lập lịch để tự gọi lại chính hàm này sau 50ms (tạo vòng lặp hiển thị)
+				self.master.after(50, self.playMovieFromBuffer)
+		else:
+            # Nếu người dùng bấm PAUSE hoặc TEARDOWN thì dừng vòng lặp
+			self.isBufferPlaying = False
+	def updateGUI(self):
+		"""Cập nhật giao diện (Thanh Cache và Progress) liên tục."""
+		
+		# 1. Cập nhật Progress Bar theo số frame hiện tại
+		self.progressScale.set(self.frameNbr)
+		
+		# 2. Cập nhật Cache Bar
+		# Tính phần trăm bộ đệm (Hiện tại / Ngưỡng)
+		current_buffer_size = len(self.cacheBuffer)
+		fill_percent = current_buffer_size / self.BUFFER_THRESHOLD
+		
+		# Giới hạn max là 100% (để không vẽ tràn ra ngoài)
+		if fill_percent > 1.0: fill_percent = 1.0
+		
+		# Tính độ rộng của thanh màu (Canvas rộng 300px)
+		bar_width = 300 * fill_percent
+		
+		# Vẽ lại hình chữ nhật
+		self.cacheCanvas.coords(self.cacheBar, 0, 0, bar_width, 20)
+		
+		# logic: Nếu chưa đầy 100% thì hiện màu đỏ, đầy rồi mới xanh
+		if current_buffer_size < self.BUFFER_THRESHOLD: 
+			self.cacheCanvas.itemconfig(self.cacheBar, fill='red')
+		else:
+			self.cacheCanvas.itemconfig(self.cacheBar, fill='green')
+		# --------------------
+
+		self.master.after(200, self.updateGUI)
